@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">DroidNotes</string>
+    <string name="nav_notes">Notes</string>
+    <string name="nav_graph">Graph</string>
+    <string name="nav_settings">Settings</string>
+    <string name="action_new_note">New note</string>
+    <string name="action_templates">Templates</string>
+    <string name="action_import">Import</string>
+    <string name="action_search_notes">Search notes and keywords…</string>
+    <string name="action_bookmark">Bookmark</string>
+    <string name="action_remove_bookmark">Remove bookmark</string>
+    <string name="action_back">Back</string>
+    <string name="action_find_in_note">Find in note</string>
+    <string name="action_more_options">More options</string>
+    <string name="status_saving">SAVING</string>
+    <string name="status_saved">SAVED</string>
+    <string name="empty_notes_title">No notes yet</string>
+    <string name="empty_notes_subtitle">Create a blank note, start from a structured template, or import .md / .txt files.</string>
+    <string name="graph_empty_title">Knowledge graph is empty</string>
+    <string name="graph_empty_subtitle">Link notes with [[Note Title]] or group topics with #tags to build your graph.</string>
+</resources>

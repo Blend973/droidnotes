@@ -9,6 +9,7 @@ import android.graphics.Rect
 import android.graphics.Typeface
 import android.graphics.pdf.PdfDocument
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.text.Layout
 import android.text.StaticLayout
@@ -23,6 +24,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
+
+enum class ExportFormat { MARKDOWN, HTML, PDF }
 
 class NoteExporter(
     private val context: Context,
@@ -221,6 +224,14 @@ class NoteExporter(
                                 drawWrappedText("[Image: ${block.alt.ifBlank { block.uri }}]", monoPaint)
                             }
                         }
+                        is MarkdownBlock.TreeBlock -> {
+                            // Keep the art intact: draw each line verbatim in monospace.
+                            block.lines.forEach { line ->
+                                ensureSpace(14f)
+                                canvas.drawText(line, margin + 8f, y + 11f, monoPaint)
+                                y += 14f
+                            }
+                        }
                         is MarkdownBlock.HorizontalRule -> {
                             ensureSpace(14f)
                             canvas.drawLine(margin, y + 4f, pageW - margin, y + 4f, linePaint)
@@ -245,18 +256,87 @@ class NoteExporter(
     suspend fun importMarkdownOrText(uris: List<Uri>): List<Pair<String, String>> = withContext(Dispatchers.IO) {
         uris.mapNotNull { uri ->
             runCatching {
-                val rawName = resolveDisplayName(uri) ?: "Imported Note"
-                val baseTitle = rawName.substringBeforeLast('.').ifBlank { "Imported Note" }
+                // Import the file's own name as the note title so it doesn't need renaming.
+                // Fall back to the first heading/line only when the provider gives no name.
+                val baseTitle = resolveDisplayName(uri)
+                    ?.substringBeforeLast('.')
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
                 val text = context.contentResolver.openInputStream(uri)?.use { stream ->
                     BufferedReader(InputStreamReader(stream, Charsets.UTF_8)).readText()
                 } ?: return@runCatching null
-                val title = NotesRepository.deriveTitleFromContent(text).let {
-                    if (it == "Untitled Note") baseTitle else it
-                }
+                val title = baseTitle ?: NotesRepository.deriveTitleFromContent(text)
                 title to text
             }.getOrNull()
         }
     }
+
+    /**
+     * Creates one document per note inside the folder the user picked, so each note is
+     * exported as its own file instead of being merged into a single file.
+     */
+    suspend fun exportNotesToTree(
+        treeUri: Uri,
+        notes: List<Pair<String, String>>,
+        format: ExportFormat,
+    ): Int = withContext(Dispatchers.IO) {
+        // OpenDocumentTree returns a tree URI, but createDocument needs a document URI
+        // pointing at that directory. Convert once before creating any files.
+        val parentDocumentUri = runCatching {
+            DocumentsContract.buildDocumentUriUsingTree(
+                treeUri,
+                DocumentsContract.getTreeDocumentId(treeUri),
+            )
+        }.getOrNull() ?: return@withContext 0
+
+        val mimeType = when (format) {
+            ExportFormat.MARKDOWN -> "text/markdown"
+            ExportFormat.HTML -> "text/html"
+            ExportFormat.PDF -> "application/pdf"
+        }
+        val extension = when (format) {
+            ExportFormat.MARKDOWN -> "md"
+            ExportFormat.HTML -> "html"
+            ExportFormat.PDF -> "pdf"
+        }
+        var written = 0
+        for ((title, content) in notes) {
+            runCatching {
+                val displayName = "${safeFileName(title)}.$extension"
+                val docUri = DocumentsContract.createDocument(
+                    context.contentResolver,
+                    parentDocumentUri,
+                    mimeType,
+                    displayName,
+                ) ?: error("Unable to create document: $displayName")
+                when (format) {
+                    ExportFormat.MARKDOWN -> writeText(docUri, content)
+                    ExportFormat.HTML -> writeText(
+                        docUri,
+                        HtmlClipboardConverter.markdownToHtml(title, MarkdownParser.parse(content)),
+                    )
+                    ExportFormat.PDF -> {
+                        val result = exportPdf(docUri, title, content)
+                        if (result.isFailure) throw result.exceptionOrNull() ?: IllegalStateException("PDF export failed")
+                    }
+                }
+                written++
+            }
+        }
+        written
+    }
+
+    private fun writeText(uri: Uri, text: String) {
+        val out = context.contentResolver.openOutputStream(uri) ?: error("Unable to open output stream")
+        out.use { it.write(text.toByteArray(Charsets.UTF_8)) }
+    }
+
+    private fun safeFileName(name: String): String =
+        name.trim()
+            .replace(Regex("""[^a-zA-Z0-9._-]+"""), "_")
+            .trim('.')
+            .take(80)
+            .ifBlank { "note" }
 
     private fun resolveDisplayName(uri: Uri): String? {
         return context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)

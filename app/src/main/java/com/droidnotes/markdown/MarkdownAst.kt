@@ -105,6 +105,12 @@ sealed interface MarkdownBlock {
         val rawRows: List<List<String>> = emptyList(),
     ) : MarkdownBlock
 
+    /** Preformatted tree/ASCII-art lines whose shape must be preserved (no wrapping). */
+    data class TreeBlock(
+        val lines: List<String>,
+        override val lineIndex: Int,
+    ) : MarkdownBlock
+
     data class Blockquote(
         val blocks: List<MarkdownBlock>,
         override val lineIndex: Int,

@@ -10,6 +10,7 @@ import com.droidnotes.data.prefs.PreferencesRepository
 import com.droidnotes.data.repo.NotesRepository
 import com.droidnotes.data.templates.NoteTemplate
 import com.droidnotes.data.templates.NoteTemplates
+import com.droidnotes.export.ExportFormat
 import com.droidnotes.export.NoteExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -322,6 +323,24 @@ class LibraryViewModel(
                 "No readable Markdown or text files found"
             } else {
                 "Imported ${imported.size} note(s)"
+            }
+        }
+    }
+
+    /** Exports each selected note as its own file inside the folder the user picked. */
+    fun exportSelectedToTree(treeUri: Uri, format: ExportFormat) {
+        val ids = selectedNoteIds.value.toList()
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            val notes = ids.mapNotNull { repository.getNoteById(it) }
+                .sortedBy { it.title.lowercase() }
+                .map { it.title to it.content }
+            if (notes.isEmpty()) return@launch
+            val count = exporter.exportNotesToTree(treeUri, notes, format)
+            statusMessage.value = if (count > 0) {
+                "Exported $count note(s)"
+            } else {
+                "Export failed"
             }
         }
     }

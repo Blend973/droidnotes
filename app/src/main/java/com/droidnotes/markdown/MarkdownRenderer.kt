@@ -244,6 +244,31 @@ private fun MarkdownBlockView(
             )
         }
 
+        is MarkdownBlock.TreeBlock -> {
+            // Tree art keeps its original line breaks and is never wrapped. A horizontal
+            // scroll lets long branches be read without distorting the shape.
+            val text = rememberSearchHighlightedPlainText(
+                text = block.lines.joinToString("\n"),
+                query = searchQuery,
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+            ) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontFamily = JetBrainsMonoFamily,
+                        fontSize = (baseSize - 1f).coerceAtLeast(10f).sp,
+                        lineHeight = lineHeightSp,
+                    ),
+                    color = MaterialTheme.colorScheme.onBackground,
+                    softWrap = false,
+                )
+            }
+        }
+
         is MarkdownBlock.CodeBlock -> {
             Column(
                 modifier = Modifier

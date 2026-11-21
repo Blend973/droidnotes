@@ -152,6 +152,7 @@ object HtmlClipboardConverter {
             }
         }</ul>"
         is MarkdownBlock.ImageBlock -> "<figure><img src=\"${escapeHtml(block.uri)}\" alt=\"${escapeHtml(block.alt)}\" style=\"max-width:100%;\"/><figcaption>${escapeHtml(block.alt)}</figcaption></figure>"
+        is MarkdownBlock.TreeBlock -> "<pre>${escapeHtml(block.lines.joinToString("\n"))}</pre>"
         is MarkdownBlock.HorizontalRule -> "<hr />"
         is MarkdownBlock.CitationDefinition -> "<div class=\"cite\" id=\"cite-${escapeHtml(block.id)}\"><strong>[${escapeHtml(block.id)}]</strong> ${inlinesToHtml(block.inlines)}</div>"
     }

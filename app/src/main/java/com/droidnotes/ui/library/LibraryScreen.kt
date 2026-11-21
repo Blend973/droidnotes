@@ -1,5 +1,6 @@
 package com.droidnotes.ui.library
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -44,6 +45,7 @@ import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Description
 import androidx.compose.material.icons.outlined.FileOpen
+import androidx.compose.material.icons.outlined.FileUpload
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.SelectAll
 import androidx.compose.material3.FloatingActionButton
@@ -71,6 +73,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -87,6 +90,7 @@ import com.droidnotes.R
 import com.droidnotes.data.db.SortOrder
 import com.droidnotes.data.templates.NoteTemplate
 import com.droidnotes.data.templates.NoteTemplates
+import com.droidnotes.export.ExportFormat
 import com.droidnotes.markdown.applySearchHighlight
 import com.droidnotes.ui.components.OledConfirmDialog
 import com.droidnotes.ui.components.OledPopupMenu
@@ -108,6 +112,7 @@ fun LibraryScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     // The search field is driven directly by ViewModel state (same pattern as the editor's
     // find bar). Keeping a second local TextFieldValue caused the cursor to jump when the
     // debounced/async state caught up with fast typing.
@@ -124,6 +129,8 @@ fun LibraryScreen(
         }
     }
     var showSortMenu by remember { mutableStateOf(false) }
+    var showExportMenu by remember { mutableStateOf(false) }
+    var pendingExportFormat by remember { mutableStateOf<ExportFormat?>(null) }
     var showTemplateDialog by remember { mutableStateOf(false) }
     var pendingDeleteNoteId by remember { mutableStateOf<String?>(null) }
     var confirmBatchDelete by remember { mutableStateOf(false) }
@@ -132,6 +139,22 @@ fun LibraryScreen(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) viewModel.importFiles(uris)
+    }
+
+    // Pick a destination folder once; the ViewModel then writes one file per note there.
+    val exportFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree(),
+    ) { treeUri ->
+        val format = pendingExportFormat
+        if (treeUri != null && format != null) {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            viewModel.exportSelectedToTree(treeUri, format)
+        }
     }
 
     BackHandler(enabled = state.isSelectionMode) {
@@ -202,6 +225,52 @@ fun LibraryScreen(
                         )
                     }
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box {
+                            IconButton(
+                                onClick = { showExportMenu = true },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("selection_export_button"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.FileUpload,
+                                    contentDescription = "Export selected notes",
+                                    tint = if (state.selectedNoteIds.isNotEmpty()) Color.White else Color(0xFF525252),
+                                )
+                            }
+                            OledPopupMenu(
+                                expanded = showExportMenu,
+                                onDismissRequest = { showExportMenu = false },
+                            ) {
+                                OledPopupMenuItem(
+                                    text = "Export Markdown (.md)",
+                                    onClick = {
+                                        showExportMenu = false
+                                        pendingExportFormat = ExportFormat.MARKDOWN
+                                        exportFolderLauncher.launch(null)
+                                    },
+                                    testTag = "selection_export_md",
+                                )
+                                OledPopupMenuItem(
+                                    text = "Export HTML (.html)",
+                                    onClick = {
+                                        showExportMenu = false
+                                        pendingExportFormat = ExportFormat.HTML
+                                        exportFolderLauncher.launch(null)
+                                    },
+                                    testTag = "selection_export_html",
+                                )
+                                OledPopupMenuItem(
+                                    text = "Export PDF (.pdf)",
+                                    onClick = {
+                                        showExportMenu = false
+                                        pendingExportFormat = ExportFormat.PDF
+                                        exportFolderLauncher.launch(null)
+                                    },
+                                    testTag = "selection_export_pdf",
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = viewModel::selectAllVisible,
                             modifier = Modifier

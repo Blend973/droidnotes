@@ -243,6 +243,7 @@ object MarkdownParser {
         is MarkdownBlock.TaskList -> block.items.any { inlinesText(it.inlines).contains(query, ignoreCase = true) }
         is MarkdownBlock.ImageBlock -> block.alt.contains(query, ignoreCase = true)
         is MarkdownBlock.CitationDefinition -> inlinesText(block.inlines).contains(query, ignoreCase = true)
+        is MarkdownBlock.TreeBlock -> block.lines.any { it.contains(query, ignoreCase = true) }
         is MarkdownBlock.HorizontalRule -> false
     }
 
@@ -435,6 +436,18 @@ object MarkdownParser {
                 continue
             }
 
+            // Tree / ASCII-art block: preserve line structure instead of merging into a
+            // paragraph (which would wrap and destroy the shape).
+            if (isTreeLine(rawLine)) {
+                val treeLines = mutableListOf<String>()
+                while (i < lines.size && isTreeLine(lines[i])) {
+                    treeLines.add(lines[i])
+                    i++
+                }
+                blocks.add(MarkdownBlock.TreeBlock(treeLines, absLine))
+                continue
+            }
+
             // Task list
             if (TASK_ITEM_REGEX.matches(rawLine)) {
                 val items = mutableListOf<TaskListItem>()
@@ -492,6 +505,7 @@ object MarkdownParser {
                     TASK_ITEM_REGEX.matches(cur) ||
                     BULLET_ITEM_REGEX.matches(cur) ||
                     ORDERED_ITEM_REGEX.matches(cur) ||
+                    isTreeLine(cur) ||
                     (i + 1 < lines.size && cur.contains("|") && TABLE_SEPARATOR_REGEX.matches(lines[i + 1].trim()))
                 ) {
                     break
@@ -730,6 +744,19 @@ object MarkdownParser {
             else -> TableAlign.LEFT
         }
     }
+
+    /**
+     * Detects a single line of tree/branch art. Box-drawing glyphs cover the common
+     * ├── / └── / │ style; the ASCII pattern covers |--, \--, +-- and -- forms.
+     * Table separator rows are handled earlier in parseBlockLines, so they never reach here.
+     */
+    private fun isTreeLine(line: String): Boolean {
+        if (line.isBlank()) return false
+        if (line.any { it in "├└│┌┐┬┴┼─╭╮╰╯═║" }) return true
+        return ASCII_TREE_REGEX.matches(line)
+    }
+
+    private val ASCII_TREE_REGEX = Regex("""^[ \t]*(?:[|\\+`][ \t]*)?-{2,}(?:[ \t]|$)""")
 
     private val HR_REGEX = Regex("""^(?:-{3,}|\*{3,}|_{3,})$""")
     private val HEADING_REGEX = Regex("""^(#{1,6})\s+(.+)$""")

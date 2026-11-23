@@ -64,8 +64,12 @@ data class EditorUiState(
     val preferences: EditorPreferences = EditorPreferences(),
     val activePaneMode: ActivePaneMode = ActivePaneMode.EDIT,
     val showFindBar: Boolean = false,
+    val showReplaceBar: Boolean = false,
     val findQuery: String = "",
+    val replaceQuery: String = "",
     val findMatches: List<Int> = emptyList(),
+    val findMatchesQuery: String = "",
+    val findMatchesContent: String = "",
     val previewMatchBlockIndices: List<Int> = emptyList(),
     val activeMatchIndex: Int = -1,
     val findNavigationSeq: Int = 0,
@@ -101,8 +105,12 @@ class EditorViewModel(
         val syntaxSpans: List<SyntaxSpan> = emptyList(),
         val paneOverride: ActivePaneMode? = null,
         val showFindBar: Boolean = false,
+        val showReplaceBar: Boolean = false,
         val findQuery: String = "",
+        val replaceQuery: String = "",
         val findMatches: List<Int> = emptyList(),
+        val findMatchesQuery: String = "",
+        val findMatchesContent: String = "",
         val previewMatchBlockIndices: List<Int> = emptyList(),
         val activeMatchIndex: Int = -1,
         val findNavigationSeq: Int = 0,
@@ -120,6 +128,7 @@ class EditorViewModel(
     private var autoSaveJob: Job? = null
     private var parseJob: Job? = null
     private var findJob: Job? = null
+    private var findRevision = 0L
     private var dirty = false
 
     private val noteTitlesFlow = repository.observeNoteTitles()
@@ -156,8 +165,12 @@ class EditorViewModel(
             preferences = prefs,
             activePaneMode = d.paneOverride ?: defaultMode,
             showFindBar = d.showFindBar,
+            showReplaceBar = d.showReplaceBar,
             findQuery = d.findQuery,
+            replaceQuery = d.replaceQuery,
             findMatches = d.findMatches,
+            findMatchesQuery = d.findMatchesQuery,
+            findMatchesContent = d.findMatchesContent,
             previewMatchBlockIndices = d.previewMatchBlockIndices,
             activeMatchIndex = d.activeMatchIndex,
             findNavigationSeq = d.findNavigationSeq,
@@ -226,6 +239,8 @@ class EditorViewModel(
                         showFindBar = trimmedQuery.isNotEmpty(),
                         findQuery = trimmedQuery,
                         findMatches = loaded.matches,
+                        findMatchesQuery = trimmedQuery,
+                        findMatchesContent = note.content,
                         previewMatchBlockIndices = loaded.blockMatches,
                         activeMatchIndex = initialMatchIndex,
                         findNavigationSeq = if (initialMatchIndex >= 0) 1 else 0,
@@ -292,6 +307,8 @@ class EditorViewModel(
             )
         }
         if (textChanged) {
+            findRevision++
+            draft.update { it.copy(findMatches = emptyList(), previewMatchBlockIndices = emptyList(), activeMatchIndex = -1, findMatchesQuery = "", findMatchesContent = "") }
             scheduleParseAndHighlights(newValue.text, draft.value.findQuery)
             onDraftMutated()
         }
@@ -325,9 +342,9 @@ class EditorViewModel(
         }
     }
 
-    fun toggleBulletList() = applyToolbarOp { MarkdownTextOps.toggleBulletList(it) }
+    fun addBulletItem() = applyToolbarOp { MarkdownTextOps.addBulletItem(it) }
 
-    fun toggleNumberedList() = applyToolbarOp { MarkdownTextOps.toggleNumberedList(it) }
+    fun addNumberedItem() = applyToolbarOp { MarkdownTextOps.addNumberedItem(it) }
 
     fun indentListItem() {
         val spaces = " ".repeat(uiState.value.preferences.tabSize.coerceAtLeast(2))
@@ -347,7 +364,7 @@ class EditorViewModel(
 
     fun removeLine() = applyToolbarOp { MarkdownTextOps.removeLines(it) }
 
-    fun toggleBlockquote() = applyToolbarOp { MarkdownTextOps.toggleBlockquote(it) }
+    fun addQuoteItem() = applyToolbarOp { MarkdownTextOps.addQuoteItem(it) }
 
     fun setPaneMode(mode: ActivePaneMode) {
         draft.update { it.copy(paneOverride = mode) }
@@ -400,7 +417,9 @@ class EditorViewModel(
         draft.update {
             it.copy(
                 showFindBar = nextOpen,
+                showReplaceBar = if (nextOpen) it.showReplaceBar else false,
                 findQuery = if (nextOpen) it.findQuery else "",
+                replaceQuery = if (nextOpen) it.replaceQuery else "",
                 findMatches = if (nextOpen) it.findMatches else emptyList(),
                 previewMatchBlockIndices = if (nextOpen) it.previewMatchBlockIndices else emptyList(),
                 activeMatchIndex = if (nextOpen) it.activeMatchIndex else -1,
@@ -409,8 +428,48 @@ class EditorViewModel(
     }
 
     fun onFindQueryChange(query: String) {
-        draft.update { it.copy(findQuery = query) }
-        recomputeFindMatches(draft.value.contentField.text, draft.value.parsedDocument, query)
+        val normalized = query.trim()
+        draft.update { it.copy(findQuery = query, findMatches = emptyList(), previewMatchBlockIndices = emptyList(), activeMatchIndex = -1, findMatchesQuery = "", findMatchesContent = "") }
+        recomputeFindMatches(draft.value.contentField.text, draft.value.parsedDocument, normalized)
+    }
+
+    fun toggleReplaceBar() {
+        draft.update { it.copy(showReplaceBar = !it.showReplaceBar) }
+    }
+
+    fun onReplaceQueryChange(query: String) {
+        draft.update { it.copy(replaceQuery = query) }
+    }
+
+    fun replaceCurrent() {
+        val d = draft.value
+        val query = d.findQuery.trim()
+        if (query.isEmpty() || d.findMatchesQuery != query || d.findMatchesContent != d.contentField.text) return
+        val start = d.findMatches.getOrNull(d.activeMatchIndex) ?: return
+        if (!d.contentField.text.regionMatches(start, query, 0, query.length, ignoreCase = true)) return
+        val text = d.contentField.text
+        val end = start + query.length
+        val newText = text.replaceRange(start, end, d.replaceQuery)
+        val nextStart = start + d.replaceQuery.length
+        val cursor = nextStart.coerceAtMost(newText.length)
+        onContentChange(TextFieldValue(newText, TextRange(cursor)), forceUndoSnapshot = true)
+        draft.update { it.copy(activeMatchIndex = -1) }
+        scheduleParseAndHighlights(newText, query, preferredOffset = nextStart)
+    }
+
+    fun replaceAll() {
+        val d = draft.value
+        val query = d.findQuery.trim()
+        if (query.isEmpty() || d.findMatchesQuery != query || d.findMatchesContent != d.contentField.text) return
+        val matches = findMatchOffsets(d.contentField.text, query)
+        if (matches.isEmpty()) return
+        val count = matches.size
+        val cursor = d.contentField.selection.start.coerceIn(0, d.contentField.text.length)
+        val newText = d.contentField.text.replace(query, d.replaceQuery, ignoreCase = true)
+        val adjustedCursor = (cursor + matches.takeWhile { it < cursor }.sumOf { d.replaceQuery.length - query.length }).coerceIn(0, newText.length)
+        onContentChange(TextFieldValue(newText, TextRange(adjustedCursor)), forceUndoSnapshot = true)
+        draft.update { it.copy(statusBanner = "Replaced $count occurrence(s)") }
+        scheduleParseAndHighlights(newText, query, preferredOffset = matches.firstOrNull())
     }
 
     fun stepFindMatch(delta: Int) {
@@ -420,7 +479,7 @@ class EditorViewModel(
         val current = d.activeMatchIndex
         val nextIdx = if (current < 0) 0 else (current + delta + matches.size) % matches.size
         val startOffset = matches[nextIdx]
-        val endOffset = (startOffset + d.findQuery.length).coerceAtMost(d.contentField.text.length)
+        val endOffset = (startOffset + d.findQuery.trim().length).coerceAtMost(d.contentField.text.length)
         draft.update {
             it.copy(
                 activeMatchIndex = nextIdx,
@@ -731,7 +790,8 @@ class EditorViewModel(
         return indices
     }
 
-    private fun scheduleParseAndHighlights(content: String, query: String) {
+    private fun scheduleParseAndHighlights(content: String, query: String, preferredOffset: Int? = null) {
+        val revision = ++findRevision
         parseJob?.cancel()
         findJob?.cancel()
         parseJob = viewModelScope.launch(Dispatchers.Default) {
@@ -746,25 +806,31 @@ class EditorViewModel(
             } else {
                 emptyList()
             }
+            if (revision != findRevision || draft.value.contentField.text != content || draft.value.findQuery.trim() != q) return@launch
             draft.update {
-                val nextActive = when {
-                    matches.isEmpty() -> -1
-                    it.activeMatchIndex in matches.indices -> it.activeMatchIndex
-                    else -> 0
-                }
+                val nextActive = if (matches.isEmpty()) -1 else preferredOffset?.let { offset ->
+                    matches.indexOfFirst { it >= offset }.takeIf { it >= 0 }
+                } ?: 0
                 it.copy(
                     parsedDocument = parsed,
                     syntaxSpans = spans,
                     lineCount = lines,
                     findMatches = matches,
+                    findMatchesQuery = q,
+                    findMatchesContent = content,
                     previewMatchBlockIndices = blockMatches,
                     activeMatchIndex = nextActive,
+                    contentField = if (preferredOffset != null && nextActive >= 0) {
+                        it.contentField.copy(selection = TextRange(matches[nextActive], (matches[nextActive] + q.length).coerceAtMost(content.length)))
+                    } else it.contentField,
+                    findNavigationSeq = if (preferredOffset != null && nextActive >= 0) it.findNavigationSeq + 1 else it.findNavigationSeq,
                 )
             }
         }
     }
 
-    private fun recomputeFindMatches(text: String, doc: MarkdownDocument, query: String) {
+    private fun recomputeFindMatches(text: String, doc: MarkdownDocument, query: String, preferredOffset: Int? = null) {
+        val revision = ++findRevision
         findJob?.cancel()
         val q = query.trim()
         if (q.isEmpty()) {
@@ -782,11 +848,14 @@ class EditorViewModel(
         findJob = viewModelScope.launch(Dispatchers.Default) {
             val indices = findMatchOffsets(text, q)
             val blockMatches = MarkdownParser.findMatchingBlockIndices(doc, q)
+            if (revision != findRevision || draft.value.contentField.text != text || draft.value.findQuery.trim() != q) return@launch
             draft.update {
                 it.copy(
                     findMatches = indices,
+                    findMatchesQuery = q,
+                    findMatchesContent = text,
                     previewMatchBlockIndices = blockMatches,
-                    activeMatchIndex = if (indices.isEmpty()) -1 else 0,
+                    activeMatchIndex = if (indices.isEmpty()) -1 else (preferredOffset?.let { offset -> indices.indexOfFirst { it >= offset }.takeIf { it >= 0 } } ?: 0),
                     findNavigationSeq = if (indices.isEmpty()) it.findNavigationSeq else it.findNavigationSeq + 1,
                 )
             }

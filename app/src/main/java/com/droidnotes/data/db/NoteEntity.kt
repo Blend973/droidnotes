@@ -57,6 +57,24 @@ data class NoteLinkEntity(
     val targetTitle: String,
 )
 
+@Entity(
+    tableName = "note_images",
+    primaryKeys = ["noteId", "imageName"],
+    foreignKeys = [
+        ForeignKey(
+            entity = NoteEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["noteId"],
+            onDelete = ForeignKey.CASCADE,
+        )
+    ],
+    indices = [Index(value = ["imageName"])]
+)
+data class NoteImageEntity(
+    val noteId: String,
+    val imageName: String,
+)
+
 enum class SortOrder(val label: String) {
     UPDATED_DESC("Recently modified"),
     CREATED_DESC("Newest created"),

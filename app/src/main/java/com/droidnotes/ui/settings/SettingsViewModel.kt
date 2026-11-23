@@ -68,6 +68,10 @@ class SettingsViewModel(
         viewModelScope.launch { preferencesRepository.updateShowNotePreview(show) }
     }
 
+    fun setShowLibraryWordCount(show: Boolean) {
+        viewModelScope.launch { preferencesRepository.updateShowLibraryWordCount(show) }
+    }
+
     fun setDefaultViewMode(mode: EditorViewMode) {
         viewModelScope.launch { preferencesRepository.updateDefaultViewMode(mode) }
     }

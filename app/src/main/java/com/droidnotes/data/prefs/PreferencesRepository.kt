@@ -28,6 +28,7 @@ class PreferencesRepository(private val context: Context) {
         val SHOW_WORD_COUNT = booleanPreferencesKey("show_word_count")
         val SHOW_CHAR_COUNT = booleanPreferencesKey("show_char_count")
         val SHOW_NOTE_PREVIEW = booleanPreferencesKey("show_note_preview")
+        val SHOW_LIBRARY_WORD_COUNT = booleanPreferencesKey("show_library_word_count")
         val DEFAULT_VIEW_MODE = stringPreferencesKey("default_view_mode")
         val RENDER_LATEX = booleanPreferencesKey("render_latex")
         val RENDER_CHARTS = booleanPreferencesKey("render_charts")
@@ -46,6 +47,7 @@ class PreferencesRepository(private val context: Context) {
             showWordCount = prefs[Keys.SHOW_WORD_COUNT] ?: true,
             showCharCount = prefs[Keys.SHOW_CHAR_COUNT] ?: true,
             showNotePreview = prefs[Keys.SHOW_NOTE_PREVIEW] ?: true,
+            showLibraryWordCount = prefs[Keys.SHOW_LIBRARY_WORD_COUNT] ?: true,
             defaultViewMode = prefs[Keys.DEFAULT_VIEW_MODE]?.let { name ->
                 EditorViewMode.entries.firstOrNull { it.name == name }
             } ?: EditorViewMode.EDIT,
@@ -95,6 +97,10 @@ class PreferencesRepository(private val context: Context) {
 
     suspend fun updateShowNotePreview(show: Boolean) {
         context.dataStore.edit { it[Keys.SHOW_NOTE_PREVIEW] = show }
+    }
+
+    suspend fun updateShowLibraryWordCount(show: Boolean) {
+        context.dataStore.edit { it[Keys.SHOW_LIBRARY_WORD_COUNT] = show }
     }
 
     suspend fun updateDefaultViewMode(mode: EditorViewMode) {

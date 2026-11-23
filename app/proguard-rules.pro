@@ -13,7 +13,8 @@
 #     RuntimeVisibleAnnotations, RuntimeVisibleParameterAnnotations,
 #     RuntimeVisibleTypeAnnotations and Signature.
 #   - Every library used here ships its own consumer rules: Room, Compose,
-#     Coroutines, Lifecycle, Navigation, Activity, DataStore/Okio.
+#     Coroutines, Lifecycle, Navigation, Activity, DataStore/Okio,
+#     kotlinx.serialization.
 #
 # App code uses no reflection, JNI, Parcelable, Serializable, WebView bridge,
 # ServiceLoader or runtime annotation processing. Therefore this file is

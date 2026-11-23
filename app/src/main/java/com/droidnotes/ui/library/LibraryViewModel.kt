@@ -15,12 +15,14 @@ import com.droidnotes.export.NoteExporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -58,6 +60,7 @@ data class LibraryUiState(
     val isSelectionMode: Boolean = false,
     val selectedNoteIds: Set<String> = emptySet(),
     val showNotePreview: Boolean = true,
+    val showLibraryWordCount: Boolean = true,
     val statusMessage: String? = null,
     val isLoading: Boolean = true,
 )
@@ -80,8 +83,20 @@ class LibraryViewModel(
 
     private val debouncedSearchQuery = searchQuery.debounce(120L)
 
-    private val matchingNotesFlow = debouncedSearchQuery
-        .flatMapLatest { query -> repository.searchNotes(query) }
+    /** Single shared query: the library previously observed the same full table twice. */
+    private val allNotesFlow = repository.observeAllNotes()
+        .flowOn(Dispatchers.Default)
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = emptyList(),
+        )
+
+    /** Null means "no search filter"; the UI falls back to [allNotesFlow]. */
+    private val matchedNotesFlow: Flow<List<NoteEntity>?> = debouncedSearchQuery
+        .flatMapLatest { query ->
+            if (query.isBlank()) flowOf(null) else repository.searchNotes(query)
+        }
 
     private data class ComputedLibraryContent(
         val notes: List<NoteSummaryItem>,
@@ -95,11 +110,12 @@ class LibraryViewModel(
         val bookmarkedOnly: Boolean,
         val selectedTag: String?,
         val showNotePreview: Boolean,
+        val showLibraryWordCount: Boolean,
     )
 
     private val contentFlow = combine(
-        matchingNotesFlow,
-        repository.observeAllNotes(),
+        allNotesFlow,
+        matchedNotesFlow,
         preferencesRepository.preferences,
         combine(
             debouncedSearchQuery,
@@ -110,18 +126,18 @@ class LibraryViewModel(
         ) { q, kwMode, sort, bm, tag ->
             FilterParams(q, kwMode, sort, bm, tag)
         },
-    ) { matched, allNotes, prefs, params ->
+    ) { allNotes, matched, prefs, params ->
         val activeSort = params.sort ?: prefs.defaultSortOrder
         val allTags = allNotes.flatMap { it.tagList() }.distinct().sorted()
         val trimmedQuery = params.query.trim()
 
-        val sourceNotes = if (params.keywordSearchMode && trimmedQuery.isNotEmpty()) {
-            allNotes.filter { note ->
+        val sourceNotes = when {
+            params.keywordSearchMode && trimmedQuery.isNotEmpty() -> allNotes.filter { note ->
                 note.title.contains(trimmedQuery, ignoreCase = true) ||
                     note.content.contains(trimmedQuery, ignoreCase = true)
             }
-        } else {
-            matched
+            trimmedQuery.isEmpty() -> allNotes
+            else -> matched.orEmpty()
         }
 
         val filtered = sourceNotes.asSequence()
@@ -176,6 +192,7 @@ class LibraryViewModel(
             bookmarkedOnly = params.bookmarkedOnly,
             selectedTag = params.selectedTag,
             showNotePreview = prefs.showNotePreview,
+            showLibraryWordCount = prefs.showLibraryWordCount,
         )
     }.flowOn(Dispatchers.Default)
 
@@ -200,6 +217,7 @@ class LibraryViewModel(
             isSelectionMode = selMode,
             selectedNoteIds = validSelection,
             showNotePreview = content.showNotePreview,
+            showLibraryWordCount = content.showLibraryWordCount,
             statusMessage = msg,
             isLoading = false,
         )
@@ -336,11 +354,11 @@ class LibraryViewModel(
                 .sortedBy { it.title.lowercase() }
                 .map { it.title to it.content }
             if (notes.isEmpty()) return@launch
-            val count = exporter.exportNotesToTree(treeUri, notes, format)
-            statusMessage.value = if (count > 0) {
-                "Exported $count note(s)"
-            } else {
-                "Export failed"
+            val result = exporter.exportNotesToTree(treeUri, notes, format)
+            statusMessage.value = when {
+                result.failed == 0 -> "Exported ${result.succeeded} note(s)"
+                result.succeeded == 0 -> "Export failed (${result.failed} note(s))"
+                else -> "Exported ${result.succeeded}; failed ${result.failed} note(s)"
             }
         }
     }

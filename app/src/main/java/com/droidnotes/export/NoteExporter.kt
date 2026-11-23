@@ -11,6 +11,7 @@ import android.graphics.pdf.PdfDocument
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.provider.OpenableColumns
+import android.provider.DocumentsContract.Document
 import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
@@ -24,8 +25,41 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.util.Locale
 
 enum class ExportFormat { MARKDOWN, HTML, PDF }
+
+data class BatchExportResult(val succeeded: Int, val failed: Int)
+
+/**
+ * Builds a safe export/display filename: strips non-alphanumeric characters from the
+ * start and end, replaces runs of them in the middle with a single underscore, and
+ * keeps Unicode letters/digits intact.
+ */
+fun safeFileName(name: String): String {
+    val trimmed = name.trim()
+    val start = trimmed.indexOfFirst { it.isLetterOrDigit() }
+    if (start < 0) return "note"
+    val end = trimmed.indexOfLast { it.isLetterOrDigit() }
+    val core = trimmed.substring(start..end)
+    val cleaned = StringBuilder()
+    var pendingUnderscore = false
+    for (ch in core) {
+        when {
+            ch.isLetterOrDigit() || ch == '.' || ch == '-' || ch == '_' -> {
+                if (pendingUnderscore && cleaned.isNotEmpty()) cleaned.append('_')
+                pendingUnderscore = false
+                cleaned.append(ch)
+            }
+            else -> pendingUnderscore = true
+        }
+    }
+    return cleaned.toString()
+        .trim(' ', '.', '-', '_')
+        .take(80)
+        .trim(' ', '.', '-', '_')
+        .ifBlank { "note" }
+}
 
 class NoteExporter(
     private val context: Context,
@@ -100,18 +134,44 @@ class NoteExporter(
                 }
             }
 
+            /** Draws arbitrarily tall layouts over as many pages as required. */
+            fun drawLayoutAcrossPages(layout: StaticLayout, x: Float, bottomPadding: Float, background: Paint? = null) {
+                var line = 0
+                while (line < layout.lineCount) {
+                    if (y >= pageH - margin) newPage()
+                    val available = (pageH - margin - y).toInt().coerceAtLeast(1)
+                    val firstTop = layout.getLineTop(line)
+                    var endLine = line
+                    while (endLine < layout.lineCount && layout.getLineBottom(endLine) - firstTop <= available) {
+                        endLine++
+                    }
+                    if (endLine == line) {
+                        newPage()
+                        continue
+                    }
+                    val chunkBottom = layout.getLineBottom(endLine - 1)
+                    background?.let { paint ->
+                        canvas.drawRect(margin, y, pageW - margin, y + chunkBottom - firstTop + 12f, paint)
+                    }
+                    canvas.save()
+                    canvas.clipRect(x, y, pageW - margin, pageH - margin)
+                    canvas.translate(x, y - firstTop)
+                    layout.draw(canvas)
+                    canvas.restore()
+                    y += chunkBottom - firstTop
+                    line = endLine
+                    if (line < layout.lineCount) newPage()
+                }
+                y += bottomPadding
+            }
+
             fun drawWrappedText(text: String, paint: TextPaint, indent: Float = 0f, extraBottom: Float = 8f) {
                 val width = (contentW - indent).toInt().coerceAtLeast(80)
                 val layout = StaticLayout.Builder.obtain(text, 0, text.length, paint, width)
                     .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                     .setLineSpacing(2f, 1.15f)
                     .build()
-                ensureSpace(layout.height + extraBottom)
-                canvas.save()
-                canvas.translate(margin + indent, y)
-                layout.draw(canvas)
-                canvas.restore()
-                y += layout.height + extraBottom
+                drawLayoutAcrossPages(layout, margin + indent, extraBottom)
             }
 
             try {
@@ -138,13 +198,7 @@ class NoteExporter(
                             val layout = StaticLayout.Builder.obtain(codeText, 0, codeText.length, monoPaint, contentW - 16)
                                 .setLineSpacing(1f, 1.1f)
                                 .build()
-                            ensureSpace(layout.height + 20f)
-                            canvas.drawRect(margin, y, pageW - margin, y + layout.height + 12f, boxPaint)
-                            canvas.save()
-                            canvas.translate(margin + 8f, y + 6f)
-                            layout.draw(canvas)
-                            canvas.restore()
-                            y += layout.height + 20f
+                            drawLayoutAcrossPages(layout, margin + 8f, 20f, boxPaint)
                         }
                         is MarkdownBlock.LatexBlock -> {
                             val math = LatexEngine.toReadableString(block.expression)
@@ -279,7 +333,7 @@ class NoteExporter(
         treeUri: Uri,
         notes: List<Pair<String, String>>,
         format: ExportFormat,
-    ): Int = withContext(Dispatchers.IO) {
+    ): BatchExportResult = withContext(Dispatchers.IO) {
         // OpenDocumentTree returns a tree URI, but createDocument needs a document URI
         // pointing at that directory. Convert once before creating any files.
         val parentDocumentUri = runCatching {
@@ -287,7 +341,7 @@ class NoteExporter(
                 treeUri,
                 DocumentsContract.getTreeDocumentId(treeUri),
             )
-        }.getOrNull() ?: return@withContext 0
+        }.getOrNull() ?: return@withContext BatchExportResult(0, notes.size)
 
         val mimeType = when (format) {
             ExportFormat.MARKDOWN -> "text/markdown"
@@ -299,44 +353,69 @@ class NoteExporter(
             ExportFormat.HTML -> "html"
             ExportFormat.PDF -> "pdf"
         }
+        val existingNames = runCatching { queryChildNames(parentDocumentUri).mapTo(mutableSetOf()) { it.lowercase(Locale.ROOT) } }
+            .getOrElse { return@withContext BatchExportResult(0, notes.size) }
         var written = 0
+        var failed = 0
         for ((title, content) in notes) {
+            var docUri: Uri? = null
             runCatching {
-                val displayName = "${safeFileName(title)}.$extension"
-                val docUri = DocumentsContract.createDocument(
+                val baseName = safeFileName(title)
+                var displayName = "$baseName.$extension"
+                var suffix = 1
+                while (displayName.lowercase(Locale.ROOT) in existingNames) {
+                    displayName = "$baseName ($suffix).$extension"
+                    suffix++
+                }
+                existingNames += displayName.lowercase(Locale.ROOT)
+                val createdUri = DocumentsContract.createDocument(
                     context.contentResolver,
                     parentDocumentUri,
                     mimeType,
                     displayName,
                 ) ?: error("Unable to create document: $displayName")
+                docUri = createdUri
                 when (format) {
-                    ExportFormat.MARKDOWN -> writeText(docUri, content)
+                    ExportFormat.MARKDOWN -> writeText(createdUri, content)
                     ExportFormat.HTML -> writeText(
-                        docUri,
+                        createdUri,
                         HtmlClipboardConverter.markdownToHtml(title, MarkdownParser.parse(content)),
                     )
                     ExportFormat.PDF -> {
-                        val result = exportPdf(docUri, title, content)
+                        val result = exportPdf(createdUri, title, content)
                         if (result.isFailure) throw result.exceptionOrNull() ?: IllegalStateException("PDF export failed")
                     }
                 }
                 written++
+            }.onFailure {
+                failed++
+                docUri?.let { uri -> runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) } }
             }
         }
-        written
+        BatchExportResult(written, failed)
+    }
+
+    /** Returns display names currently present in the chosen SAF directory. */
+    private fun queryChildNames(parentUri: Uri): Set<String> {
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(
+            parentUri,
+            DocumentsContract.getDocumentId(parentUri),
+        )
+        val cursor = context.contentResolver.query(childrenUri, arrayOf(Document.COLUMN_DISPLAY_NAME), null, null, null)
+            ?: error("Unable to list files in selected folder")
+        return cursor.use {
+            buildSet {
+                val nameColumn = it.getColumnIndex(Document.COLUMN_DISPLAY_NAME)
+                if (nameColumn < 0) error("Folder provider did not return display names")
+                while (it.moveToNext()) add(it.getString(nameColumn))
+            }
+        }
     }
 
     private fun writeText(uri: Uri, text: String) {
         val out = context.contentResolver.openOutputStream(uri) ?: error("Unable to open output stream")
         out.use { it.write(text.toByteArray(Charsets.UTF_8)) }
     }
-
-    private fun safeFileName(name: String): String =
-        name.trim()
-            .replace(Regex("""[^a-zA-Z0-9._-]+"""), "_")
-            .trim('.')
-            .take(80)
-            .ifBlank { "note" }
 
     private fun resolveDisplayName(uri: Uri): String? {
         return context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)

@@ -14,6 +14,7 @@ data class EditorPreferences(
     val showWordCount: Boolean = true,
     val showCharCount: Boolean = true,
     val showNotePreview: Boolean = true,
+    val showLibraryWordCount: Boolean = true,
     val defaultViewMode: EditorViewMode = EditorViewMode.EDIT,
     val renderLatex: Boolean = true,
     val renderCharts: Boolean = true,

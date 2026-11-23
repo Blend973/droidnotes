@@ -40,11 +40,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.alpha
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.outlined.BookmarkBorder
 import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.FindReplace
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.KeyboardArrowUp
@@ -106,6 +108,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.droidnotes.R
+import com.droidnotes.export.safeFileName
 import com.droidnotes.markdown.MarkdownBlock
 import com.droidnotes.markdown.MarkdownPreview
 import com.droidnotes.markdown.MarkdownSyntaxVisualTransformation
@@ -118,7 +121,6 @@ import com.droidnotes.ui.theme.JetBrainsMonoFamily
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-private val SAFE_FILENAME_REGEX = Regex("""[^a-zA-Z0-9_-]+""")
 private const val CURSOR_MARKER = "⟦cursor⟧"
 
 @Composable
@@ -141,6 +143,7 @@ fun EditorScreen(
     var confirmDeleteDialog by remember { mutableStateOf(false) }
     var confirmExitUnsavedDialog by remember { mutableStateOf(false) }
     val findFocusRequester = remember { FocusRequester() }
+    val replaceFocusRequester = remember { FocusRequester() }
 
     // Editing/find stays immediate, but preview highlighting is debounced so typing in the
     // find bar doesn't rebuild AnnotatedString for every table cell on every keystroke.
@@ -181,9 +184,7 @@ fun EditorScreen(
         contract = ActivityResultContracts.CreateDocument("application/pdf"),
     ) { uri: Uri? -> if (uri != null) viewModel.exportPdf(uri) }
 
-    val safeFilenameBase = remember(state.title) {
-        state.title.trim().replace(SAFE_FILENAME_REGEX, "_").ifBlank { "note" }
-    }
+    val safeFilenameBase = remember(state.title) { safeFileName(state.title) }
 
     fun requestNavigateBack() {
         if (state.preferences.autoSaveEnabled) {
@@ -236,13 +237,11 @@ fun EditorScreen(
             editorScrollState.scrollTo(targetScroll)
         }
 
-        val blockMatches = state.previewMatchBlockIndices
-        if (blockMatches.isNotEmpty()) {
-            val totalMatches = state.findMatches.size.coerceAtLeast(1)
-            val blockIdxPos = ((matchIdx.toFloat() / totalMatches) * blockMatches.size)
-                .toInt()
-                .coerceIn(0, blockMatches.lastIndex)
-            previewListState.scrollToItem(blockMatches[blockIdxPos])
+        val blocks = state.parsedDocument.blocks
+        if (charOffset != null && blocks.isNotEmpty()) {
+            val sourceLine = state.contentField.text.take(charOffset).count { it == '\n' }
+            val blockIndex = blocks.indexOfLast { it.lineIndex <= sourceLine }.coerceAtLeast(0)
+            previewListState.scrollToItem(blockIndex)
         }
     }
 
@@ -526,11 +525,15 @@ fun EditorScreen(
 
                 // Find & Highlight Bar
                 if (state.showFindBar) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(Color(0xFF0A0A0A))
-                            .border(1.dp, MaterialTheme.colorScheme.outline)
+                            .border(1.dp, MaterialTheme.colorScheme.outline),
+                    ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -625,6 +628,18 @@ fun EditorScreen(
                             )
                         }
                         IconButton(
+                            onClick = viewModel::toggleReplaceBar,
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .testTag("toggle_replace_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.FindReplace,
+                                contentDescription = "Toggle replace",
+                                tint = Color.White,
+                            )
+                        }
+                        IconButton(
                             onClick = viewModel::toggleFindBar,
                             modifier = Modifier.minimumInteractiveComponentSize(),
                         ) {
@@ -634,6 +649,83 @@ fun EditorScreen(
                                 tint = Color.White,
                             )
                         }
+                    }
+                    if (state.showReplaceBar) {
+                        HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outline)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(modifier = Modifier.weight(1f)) {
+                                if (state.replaceQuery.isEmpty()) {
+                                    Text(
+                                        text = "Replace with…",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                BasicTextField(
+                                    value = state.replaceQuery,
+                                    onValueChange = viewModel::onReplaceQueryChange,
+                                    singleLine = true,
+                                    cursorBrush = SolidColor(Color.White),
+                                    textStyle = TextStyle(
+                                        color = Color.White,
+                                        fontFamily = JetBrainsMonoFamily,
+                                        fontSize = 13.sp,
+                                    ),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .focusRequester(replaceFocusRequester)
+                                        .trackFocusBounds()
+                                        .testTag("replace_in_note_input"),
+                                )
+                            }
+                            IconButton(
+                                onClick = {
+                                    viewModel.onReplaceQueryChange("")
+                                    replaceFocusRequester.requestFocus()
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("replace_clear_button"),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Close,
+                                    contentDescription = "Clear replacement",
+                                    tint = Color.White,
+                                )
+                            }
+                            Text(
+                                text = "One",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clickable(enabled = state.findMatches.isNotEmpty() && state.findMatchesQuery == state.findQuery.trim() && state.findMatchesContent == state.contentField.text) {
+                                        viewModel.replaceCurrent()
+                                        findFocusRequester.requestFocus()
+                                    }
+                                    .then(if (state.findMatches.isNotEmpty() && state.findMatchesQuery == state.findQuery.trim() && state.findMatchesContent == state.contentField.text) Modifier else Modifier.alpha(0.38f))
+                                    .padding(horizontal = 8.dp, vertical = 10.dp)
+                                    .testTag("replace_current_button"),
+                            )
+                            Text(
+                                text = "All",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                modifier = Modifier
+                                    .clickable(enabled = state.findMatches.isNotEmpty() && state.findMatchesQuery == state.findQuery.trim() && state.findMatchesContent == state.contentField.text) {
+                                        viewModel.replaceAll()
+                                        findFocusRequester.requestFocus()
+                                    }
+                                    .then(if (state.findMatches.isNotEmpty() && state.findMatchesQuery == state.findQuery.trim() && state.findMatchesContent == state.contentField.text) Modifier else Modifier.alpha(0.38f))
+                                    .padding(horizontal = 8.dp, vertical = 10.dp)
+                                    .testTag("replace_all_button"),
+                            )
+                        }
+                    }
                     }
                 }
 
@@ -734,11 +826,11 @@ fun EditorScreen(
                         canRedo = state.canRedo,
                         onUndo = viewModel::undo,
                         onRedo = viewModel::redo,
-                        onToggleBulletList = viewModel::toggleBulletList,
-                        onToggleNumberedList = viewModel::toggleNumberedList,
+                        onAddBulletItem = viewModel::addBulletItem,
+                        onAddNumberedItem = viewModel::addNumberedItem,
                         onIndent = viewModel::indentListItem,
                         onUnindent = viewModel::unindentListItem,
-                        onToggleBlockquote = viewModel::toggleBlockquote,
+                        onAddQuoteItem = viewModel::addQuoteItem,
                         onMoveLineUp = viewModel::moveLineUp,
                         onMoveLineDown = viewModel::moveLineDown,
                         onRemoveLine = viewModel::removeLine,
@@ -930,6 +1022,26 @@ private fun RawMarkdownEditorPane(
     ) {
         val viewportHeightPx = with(density) { maxHeight.toPx() }
 
+        // Only follow the caret when it is at the absolute start or end of the document.
+        // Use immediate scroll jumps; caret boundary navigation must not animate.
+        LaunchedEffect(state.contentField.selection.min, textLayout, viewportHeightPx) {
+            val layout = textLayout ?: return@LaunchedEffect
+            val caret = state.contentField.selection.min
+            val textLength = state.contentField.text.length
+            if (caret == 0) {
+                if (scrollState.value != 0) scrollState.scrollTo(0)
+            } else if (caret >= textLength && textLength > 0) {
+                val lastLine = (layout.lineCount - 1).coerceAtLeast(0)
+                val bottom = layout.getLineBottom(lastLine)
+                val target = (bottom - viewportHeightPx + 80f)
+                    .coerceIn(0f, scrollState.maxValue.toFloat())
+                    .toInt()
+                if (kotlin.math.abs(target - scrollState.value) > 4) {
+                    scrollState.scrollTo(target)
+                }
+            }
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxSize()
@@ -1101,11 +1213,11 @@ private fun MarkdownFormattingBar(
     canRedo: Boolean,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
-    onToggleBulletList: () -> Unit,
-    onToggleNumberedList: () -> Unit,
+    onAddBulletItem: () -> Unit,
+    onAddNumberedItem: () -> Unit,
     onIndent: () -> Unit,
     onUnindent: () -> Unit,
-    onToggleBlockquote: () -> Unit,
+    onAddQuoteItem: () -> Unit,
     onMoveLineUp: () -> Unit,
     onMoveLineDown: () -> Unit,
     onRemoveLine: () -> Unit,
@@ -1128,11 +1240,11 @@ private fun MarkdownFormattingBar(
             ToolbarChip("Undo", enabled = canUndo, onClick = onUndo)
             ToolbarChip("Redo", enabled = canRedo, onClick = onRedo)
             ToolbarChip("Tab") { onInsertSnippet(tabSpaces, null) }
-            ToolbarChip("• List", onClick = onToggleBulletList)
-            ToolbarChip("1. List", onClick = onToggleNumberedList)
+            ToolbarChip("• List", onClick = onAddBulletItem)
+            ToolbarChip("1. List", onClick = onAddNumberedItem)
             ToolbarChip("Indent", onClick = onIndent)
             ToolbarChip("Unindent", onClick = onUnindent)
-            ToolbarChip("> Quote", onClick = onToggleBlockquote)
+            ToolbarChip("> Quote", onClick = onAddQuoteItem)
             ToolbarChip("↑ Line", onClick = onMoveLineUp)
             ToolbarChip("↓ Line", onClick = onMoveLineDown)
             ToolbarChip("Del Line", onClick = onRemoveLine)

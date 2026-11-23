@@ -1,25 +1,27 @@
 package com.droidnotes.markdown
 
+import java.io.File
+
 object MarkdownParser {
-    private const val MAX_CACHE_ENTRIES = 24
-    private val cache = object : LinkedHashMap<Int, Pair<String, MarkdownDocument>>(32, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Pair<String, MarkdownDocument>>?): Boolean {
-            return size > MAX_CACHE_ENTRIES
-        }
+    @Volatile
+    private var diskCache: MarkdownAstDiskCache? = null
+
+    /**
+     * Enables the disk-backed AST cache. Must be called before parsing to persist results;
+     * without it, parsing falls back to the uncached path.
+     */
+    fun configure(cacheDir: File) {
+        diskCache = MarkdownAstDiskCache(cacheDir)
     }
 
     fun parse(source: String): MarkdownDocument {
-        val key = source.hashCode()
-        synchronized(cache) {
-            val hit = cache[key]
-            if (hit != null && hit.first == source) {
-                return hit.second
-            }
+        val cache = diskCache
+        if (cache != null) {
+            cache.get(source)?.let { return it }
         }
+
         val parsed = parseUncached(source)
-        synchronized(cache) {
-            cache[key] = source to parsed
-        }
+        cache?.put(source, parsed)
         return parsed
     }
 
@@ -395,15 +397,17 @@ object MarkdownParser {
                 continue
             }
 
-            // Blockquote
+            // Blockquote: keep each quoted line as its own block so adjacent quotes
+            // do not merge when there is no blank line between them.
             if (trimmed.startsWith(">")) {
-                val quoteLines = mutableListOf<String>()
                 while (i < lines.size && lines[i].trim().startsWith(">")) {
-                    quoteLines.add(lines[i].trim().removePrefix(">").trimStart())
+                    val quoteLine = lines[i].trim().removePrefix(">").trimStart()
+                    if (quoteLine.isNotBlank()) {
+                        val inner = parseBlockLines(listOf(quoteLine), baseLineOffset + i, citations)
+                        blocks.add(MarkdownBlock.Blockquote(inner, baseLineOffset + i))
+                    }
                     i++
                 }
-                val inner = parseBlockLines(quoteLines, absLine, citations)
-                blocks.add(MarkdownBlock.Blockquote(inner, absLine))
                 continue
             }
 

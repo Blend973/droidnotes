@@ -3,17 +3,22 @@ package com.droidnotes.data.repo
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.net.Uri
+import com.droidnotes.data.db.LocalImageRefs
 import com.droidnotes.data.db.NoteDao
 import com.droidnotes.data.db.NoteEntity
 import com.droidnotes.data.db.NoteLinkEntity
 import com.droidnotes.data.db.NoteTitleProjection
 import com.droidnotes.data.templates.NoteTemplate
+import com.droidnotes.markdown.DecodedBitmapDiskCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.UUID
 
 class NotesRepository(
@@ -78,9 +83,11 @@ class NotesRepository(
             createdAt = now,
             updatedAt = now,
         )
+        val links = linksFor(note.id, note.content)
+        val imageNames = LocalImageRefs.extractNames(note.content).toList()
         withContext(Dispatchers.IO) {
-            noteDao.upsertNote(note)
-            syncLinks(note.id, note.content)
+            val orphaned = noteDao.upsertNoteWithRelations(note, links, imageNames)
+            deleteMedia(orphaned)
         }
         note
     }
@@ -113,9 +120,11 @@ class NotesRepository(
             createdAt = createdAt,
             updatedAt = now,
         )
+        val links = linksFor(updated.id, updated.content)
+        val imageNames = LocalImageRefs.extractNames(updated.content).toList()
         withContext(Dispatchers.IO) {
-            noteDao.upsertNote(updated)
-            syncLinks(updated.id, updated.content)
+            val orphaned = noteDao.upsertNoteWithRelations(updated, links, imageNames)
+            deleteMedia(orphaned)
         }
         updated
     }
@@ -126,46 +135,44 @@ class NotesRepository(
         }
     }
 
-    suspend fun deleteNote(id: String) {
-        withContext(Dispatchers.IO) {
-            noteDao.deleteNoteById(id)
-        }
-    }
+    suspend fun deleteNote(id: String) = deleteNotes(listOf(id))
 
     suspend fun deleteNotes(ids: List<String>) {
         if (ids.isEmpty()) return
         withContext(Dispatchers.IO) {
-            ids.chunked(500).forEach { batch ->
-                noteDao.deleteNotesByIds(batch)
-            }
+            val orphaned = noteDao.deleteNotesAndCollectOrphanedImages(ids)
+            deleteMedia(orphaned)
         }
     }
 
     suspend fun saveImageFromUri(sourceUri: Uri): String? = withContext(Dispatchers.IO) {
         runCatching {
-            val fileName = "img_${UUID.randomUUID()}.png"
+            val bytes = context.contentResolver.openInputStream(sourceUri)?.use { it.readBytes() }
+                ?: return@runCatching null
+            val hash = sha256(bytes).take(16)
+            val fileName = "img_$hash.jpg"
             val destFile = File(mediaDir, fileName)
-            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                BitmapFactory.decodeStream(input, null, bounds)
-            }
-            val sampleSize = calculateInSampleSize(bounds.outWidth, bounds.outHeight, 2048, 2048)
-            val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sampleSize }
-            val bitmap = context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                BitmapFactory.decodeStream(input, null, decodeOpts)
-            }
-            if (bitmap != null) {
-                try {
-                    FileOutputStream(destFile).use { out ->
-                        bitmap.compress(Bitmap.CompressFormat.PNG, 90, out)
+            if (!destFile.exists()) {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+                val sample = calculateInSampleSize(
+                    bounds.outWidth,
+                    bounds.outHeight,
+                    MAX_IMAGE_DIMENSION,
+                    MAX_IMAGE_DIMENSION,
+                )
+                if (sample == 1 && bytes.isJpeg()) {
+                    FileOutputStream(destFile).use { it.write(bytes) }
+                } else {
+                    val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+                    val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                        ?: return@runCatching null
+                    try {
+                        FileOutputStream(destFile).use { it.write(jpegBytes(decoded)) }
+                    } finally {
+                        decoded.recycle()
                     }
-                } finally {
-                    bitmap.recycle()
                 }
-            } else {
-                context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                    FileOutputStream(destFile).use { out -> input.copyTo(out) }
-                } ?: return@runCatching null
             }
             "local://images/$fileName"
         }.getOrNull()
@@ -173,11 +180,9 @@ class NotesRepository(
 
     suspend fun saveBitmapImage(bitmap: Bitmap): String? = withContext(Dispatchers.IO) {
         runCatching {
-            val fileName = "clip_${UUID.randomUUID()}.png"
-            val destFile = File(mediaDir, fileName)
             val maxDim = maxOf(bitmap.width, bitmap.height)
-            val scaled = if (maxDim > 2048) {
-                val ratio = 2048f / maxDim
+            val scaled = if (maxDim > MAX_IMAGE_DIMENSION) {
+                val ratio = MAX_IMAGE_DIMENSION.toFloat() / maxDim
                 Bitmap.createScaledBitmap(
                     bitmap,
                     (bitmap.width * ratio).toInt().coerceAtLeast(1),
@@ -188,14 +193,30 @@ class NotesRepository(
                 bitmap
             }
             try {
-                FileOutputStream(destFile).use { out ->
-                    scaled.compress(Bitmap.CompressFormat.PNG, 90, out)
-                }
+                val encoded = jpegBytes(scaled)
+                val fileName = "clip_${sha256(encoded).take(16)}.jpg"
+                val destFile = File(mediaDir, fileName)
+                if (!destFile.exists()) FileOutputStream(destFile).use { it.write(encoded) }
+                "local://images/$fileName"
             } finally {
                 if (scaled !== bitmap) scaled.recycle()
             }
-            "local://images/$fileName"
         }.getOrNull()
+    }
+
+    private fun jpegBytes(bitmap: Bitmap): ByteArray {
+        // JPEG has no alpha, so flatten onto the app's dark canvas before encoding.
+        val flat = Bitmap.createBitmap(bitmap.width, bitmap.height, Bitmap.Config.RGB_565)
+        try {
+            val canvas = Canvas(flat)
+            canvas.drawColor(JPEG_BACKGROUND)
+            canvas.drawBitmap(bitmap, 0f, 0f, null)
+            val out = ByteArrayOutputStream()
+            flat.compress(Bitmap.CompressFormat.JPEG, JPEG_QUALITY, out)
+            return out.toByteArray()
+        } finally {
+            flat.recycle()
+        }
     }
 
     fun resolveLocalImageFile(uriString: String): File? {
@@ -208,11 +229,34 @@ class NotesRepository(
         return if (direct.exists()) direct else null
     }
 
-    private suspend fun syncLinks(noteId: String, content: String) {
-        val links = extractWikiLinks(content).map { target ->
+    private fun linksFor(noteId: String, content: String): List<NoteLinkEntity> =
+        extractWikiLinks(content).map { target ->
             NoteLinkEntity(sourceNoteId = noteId, targetTitle = target)
         }
-        noteDao.replaceLinksForNote(noteId, links)
+
+    private fun deleteMedia(names: Collection<String>) {
+        names.forEach { name ->
+            runCatching { File(mediaDir, name).delete() }
+            DecodedBitmapDiskCache.remove("local://images/$name")
+        }
+    }
+
+    /** Deletes media files that are no longer referenced by any note. */
+    suspend fun cleanupOrphanedMedia(minAgeMs: Long = ORPHAN_FILE_MIN_AGE_MS) {
+        withContext(Dispatchers.IO) {
+            val referenced = noteDao.getAllImageNames().toSet()
+            // Safety valve: never mass-delete if the index is empty despite existing notes.
+            if (referenced.isEmpty() && noteDao.countNotes() > 0) return@withContext
+
+            val cutoff = System.currentTimeMillis() - minAgeMs
+            val files = mediaDir.listFiles() ?: return@withContext
+            files.forEach { file ->
+                if (file.isFile && file.name !in referenced && file.lastModified() < cutoff) {
+                    runCatching { file.delete() }
+                    DecodedBitmapDiskCache.remove("local://images/${file.name}")
+                }
+            }
+        }
     }
 
     private fun buildUpdatedEntity(
@@ -243,7 +287,20 @@ class NotesRepository(
     }
 
     companion object {
+        private const val MAX_IMAGE_DIMENSION = 1600
+        private const val JPEG_QUALITY = 85
+        private const val JPEG_BACKGROUND = 0xFF0A0A0A.toInt()
+        private const val ORPHAN_FILE_MIN_AGE_MS = 60L * 60L * 1000L
+
         private val WIKILINK_REGEX = Regex("""\[\[([^\[\]\n|#]+?)(?:\|[^\[\]\n]+)?]]""")
+
+        private fun sha256(bytes: ByteArray): String =
+            MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { (it.toInt() and 0xff).toString(16).padStart(2, '0') }
+
+        private fun ByteArray.isJpeg(): Boolean =
+            size >= 2 && this[0] == 0xFF.toByte() && this[1] == 0xD8.toByte()
+
         private val TAG_REGEX = Regex("""(?:^|\s)#([a-zA-Z][a-zA-Z0-9_-]{0,31})""")
         private val CODE_FENCE_REGEX = Regex("""```[\s\S]*?```""")
         private val FTS_TOKEN_REGEX = Regex("[\\p{L}\\p{N}_]+")

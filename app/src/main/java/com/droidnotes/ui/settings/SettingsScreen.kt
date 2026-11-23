@@ -154,6 +154,14 @@ fun SettingsScreen(
                 onCheckedChange = viewModel::setShowNotePreview,
                 testTag = "toggle_note_preview",
             )
+            HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outline)
+            ToggleRow(
+                title = "Show word count in Library",
+                subtitle = "Display note word counts alongside update times",
+                checked = prefs.showLibraryWordCount,
+                onCheckedChange = viewModel::setShowLibraryWordCount,
+                testTag = "toggle_library_word_count",
+            )
         }
 
         // Editor Counters

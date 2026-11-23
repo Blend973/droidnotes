@@ -2,11 +2,11 @@ package com.droidnotes.markdown
 
 import android.graphics.BitmapFactory
 import android.net.Uri
-import android.util.LruCache
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -41,9 +42,11 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,6 +55,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
@@ -75,6 +80,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.droidnotes.data.prefs.EditorPreferences
 import com.droidnotes.data.repo.NotesRepository
 import com.droidnotes.ui.theme.JetBrainsMonoFamily
@@ -82,23 +89,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
-
-private object BitmapMemoryCache {
-    private val maxKb = (Runtime.getRuntime().maxMemory() / 1024L / 8L)
-        .toInt()
-        .coerceIn(4096, 32768)
-
-    private val cache = object : LruCache<String, ImageBitmap>(maxKb) {
-        override fun sizeOf(key: String, value: ImageBitmap): Int {
-            return ((value.width.toLong() * value.height.toLong() * 4L) / 1024L)
-                .toInt()
-                .coerceAtLeast(1)
-        }
-    }
-
-    fun get(key: String): ImageBitmap? = synchronized(cache) { cache.get(key) }
-    fun put(key: String, bmp: ImageBitmap) = synchronized(cache) { cache.put(key, bmp) }
-}
 
 @Composable
 fun MarkdownPreview(
@@ -586,13 +576,14 @@ private fun MarkdownBlockView(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .height(IntrinsicSize.Min)
                     .background(Color(0xFF0A0A0A), RoundedCornerShape(4.dp))
                     .padding(vertical = 8.dp, horizontal = 10.dp),
             ) {
                 Box(
                     modifier = Modifier
                         .width(3.dp)
-                        .height(22.dp)
+                        .fillMaxHeight()
                         .background(Color.White)
                 )
                 Spacer(modifier = Modifier.width(12.dp))
@@ -833,10 +824,13 @@ private fun MarkdownLocalImage(
     resolveImageFile: (String) -> File?,
 ) {
     val context = LocalContext.current
-    val bitmap by produceState<ImageBitmap?>(initialValue = BitmapMemoryCache.get(uri), key1 = uri) {
-        if (value != null) return@produceState
+    var showFullscreen by remember { mutableStateOf(false) }
+    var zoomScale by remember { mutableStateOf(1f) }
+    var panX by remember { mutableStateOf(0f) }
+    var panY by remember { mutableStateOf(0f) }
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, key1 = uri) {
         value = withContext(Dispatchers.IO) {
-            runCatching {
+            DecodedBitmapDiskCache.get(uri)?.asImageBitmap() ?: runCatching {
                 val file = resolveImageFile(uri)
                 val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 when {
@@ -858,7 +852,7 @@ private fun MarkdownLocalImage(
                     }
                     else -> null
                 }
-                decoded?.asImageBitmap()?.also { BitmapMemoryCache.put(uri, it) }
+                decoded?.also { DecodedBitmapDiskCache.put(uri, it) }?.asImageBitmap()
             }.getOrNull()
         }
     }
@@ -875,10 +869,16 @@ private fun MarkdownLocalImage(
             Image(
                 bitmap = loaded,
                 contentDescription = alt.ifBlank { "Embedded note image" },
-                contentScale = ContentScale.Fit,
+                contentScale = ContentScale.FillWidth,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(220.dp),
+                    .heightIn(max = 320.dp)
+                    .clickable {
+                        zoomScale = 1f
+                        panX = 0f
+                        panY = 0f
+                        showFullscreen = true
+                    },
             )
         } else {
             Row(
@@ -907,6 +907,69 @@ private fun MarkdownLocalImage(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             )
+        }
+    }
+
+    val fullImage = bitmap
+    if (showFullscreen && fullImage != null) {
+        Dialog(
+            onDismissRequest = { showFullscreen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                Image(
+                    bitmap = fullImage,
+                    contentDescription = alt.ifBlank { "Embedded note image" },
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = zoomScale,
+                            scaleY = zoomScale,
+                            translationX = panX,
+                            translationY = panY,
+                        )
+                        .pointerInput(Unit) {
+                            detectTransformGestures { _, pan, zoom, _ ->
+                                zoomScale = (zoomScale * zoom).coerceIn(1f, 8f)
+                                if (zoomScale == 1f) {
+                                    panX = 0f
+                                    panY = 0f
+                                } else {
+                                    panX += pan.x
+                                    panY += pan.y
+                                }
+                            }
+                        },
+                )
+                Row(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "Close",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White,
+                        modifier = Modifier
+                            .clickable {
+                                showFullscreen = false
+                                zoomScale = 1f
+                                panX = 0f
+                                panY = 0f
+                            }
+                            .padding(10.dp),
+                    )
+                    Text(
+                        text = "Reset",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White,
+                        modifier = Modifier
+                            .clickable {
+                                zoomScale = 1f
+                                panX = 0f
+                                panY = 0f
+                            }
+                            .padding(10.dp),
+                    )
+                }
+            }
         }
     }
 }

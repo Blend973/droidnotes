@@ -102,7 +102,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 
-private val NOTE_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d · HH:mm")
+private val NOTE_DATE_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("MMM d · h:mm a")
 
 @Composable
 fun LibraryScreen(
@@ -228,6 +228,7 @@ fun LibraryScreen(
                         Box {
                             IconButton(
                                 onClick = { showExportMenu = true },
+                                enabled = state.selectedNoteIds.isNotEmpty(),
                                 modifier = Modifier
                                     .minimumInteractiveComponentSize()
                                     .testTag("selection_export_button"),
@@ -661,6 +662,7 @@ fun LibraryScreen(
                             item = item,
                             searchQuery = highlightQuery,
                             showNotePreview = state.showNotePreview,
+                            showWordCount = state.showLibraryWordCount,
                             isSelectionMode = state.isSelectionMode,
                             isSelected = isSelected,
                             onClick = {
@@ -775,6 +777,7 @@ private fun NoteSummaryCard(
     item: NoteSummaryItem,
     searchQuery: String,
     showNotePreview: Boolean,
+    showWordCount: Boolean,
     isSelectionMode: Boolean,
     isSelected: Boolean,
     onClick: () -> Unit,
@@ -926,7 +929,7 @@ private fun NoteSummaryCard(
                 }
             }
             Text(
-                text = "${note.wordCount}w · $dateLabel",
+                text = (if (showWordCount) "${note.wordCount}w · " else "") + dateLabel,
                 style = MaterialTheme.typography.labelSmall,
                 color = Color(0xFF737373),
                 maxLines = 1,

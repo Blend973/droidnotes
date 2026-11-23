@@ -7,9 +7,7 @@ import androidx.compose.ui.text.input.TextFieldValue
  * Pure Kotlin line/paragraph editing operations for the Markdown formatting toolbar.
  */
 object MarkdownTextOps {
-    private val BULLET_REGEX = Regex("""^(\s*)[-*+]\s+(.*)$""")
-    private val NUMBERED_REGEX = Regex("""^(\s*)\d+\.\s+(.*)$""")
-    private val BLOCKQUOTE_REGEX = Regex("""^(\s*)>\s?(.*)$""")
+    private val NUMBERED_REGEX = Regex("""^(\s*)(\d+)\.\s+(.*)$""")
 
     private data class LineSpan(val start: Int, val end: Int, val text: String)
 
@@ -45,75 +43,39 @@ object MarkdownTextOps {
         return acc
     }
 
-    fun toggleBulletList(field: TextFieldValue): TextFieldValue {
-        val spans = splitLineSpans(field.text)
-        val range = selectedLineRange(spans, field.selection)
-        val lines = spans.map { it.text }.toMutableList()
-
-        val allBulleted = range.all { BULLET_REGEX.matches(lines[it]) }
-        var firstDelta = 0
-        var totalDelta = 0
-
-        for (i in range) {
-            val line = lines[i]
-            val updated = if (allBulleted) {
-                val m = BULLET_REGEX.matchEntire(line)!!
-                m.groupValues[1] + m.groupValues[2]
-            } else {
-                val numMatch = NUMBERED_REGEX.matchEntire(line)
-                if (numMatch != null) {
-                    "${numMatch.groupValues[1]}- ${numMatch.groupValues[2]}"
-                } else {
-                    val indent = line.takeWhile { it == ' ' || it == '\t' }
-                    val rest = line.drop(indent.length)
-                    "$indent- $rest"
-                }
-            }
-            val delta = updated.length - line.length
-            if (i == range.first) firstDelta = delta
-            totalDelta += delta
-            lines[i] = updated
-        }
-
-        val newText = rebuildFromLines(lines)
-        val newSel = adjustSelection(field.selection, newText.length, firstDelta, totalDelta)
-        return TextFieldValue(newText, newSel)
+    /** Inserts a new list-item line after the line containing the caret. */
+    private fun insertListItem(field: TextFieldValue, prefix: String): TextFieldValue {
+        val text = field.text
+        val pos = field.selection.max.coerceIn(0, text.length)
+        val lineEnd = text.indexOf('\n', pos).let { if (it < 0) text.length else it }
+        val snippet = "\n$prefix"
+        val newText = text.substring(0, lineEnd) + snippet + text.substring(lineEnd)
+        return TextFieldValue(newText, TextRange(lineEnd + snippet.length))
     }
 
-    fun toggleNumberedList(field: TextFieldValue): TextFieldValue {
+    fun addBulletItem(field: TextFieldValue): TextFieldValue =
+        insertListItem(field, "- ")
+
+    fun addQuoteItem(field: TextFieldValue): TextFieldValue =
+        insertListItem(field, "> ")
+
+    fun addNumberedItem(field: TextFieldValue): TextFieldValue {
         val spans = splitLineSpans(field.text)
-        val range = selectedLineRange(spans, field.selection)
-        val lines = spans.map { it.text }.toMutableList()
-
-        val allNumbered = range.all { NUMBERED_REGEX.matches(lines[it]) }
-        var firstDelta = 0
-        var totalDelta = 0
-
-        for ((offsetIdx, i) in range.withIndex()) {
-            val line = lines[i]
-            val updated = if (allNumbered) {
-                val m = NUMBERED_REGEX.matchEntire(line)!!
-                m.groupValues[1] + m.groupValues[2]
-            } else {
-                val numPrefix = "${offsetIdx + 1}. "
-                val bulletMatch = BULLET_REGEX.matchEntire(line)
-                if (bulletMatch != null) {
-                    "${bulletMatch.groupValues[1]}$numPrefix${bulletMatch.groupValues[2]}"
-                } else {
-                    val indent = line.takeWhile { it == ' ' || it == '\t' }
-                    val rest = line.drop(indent.length)
-                    "$indent$numPrefix$rest"
-                }
+        val pos = field.selection.max.coerceIn(0, field.text.length)
+        val currentLine = spans.indexOfLast { it.start <= pos }.coerceAtLeast(0)
+        var number = 1
+        var indent = ""
+        for (i in currentLine downTo 0) {
+            val line = spans[i].text
+            if (line.isBlank()) continue
+            val match = NUMBERED_REGEX.matchEntire(line)
+            if (match != null) {
+                number = (match.groupValues[2].toIntOrNull() ?: 0) + 1
+                indent = match.groupValues[1]
             }
-            val delta = updated.length - line.length
-            if (i == range.first) firstDelta = delta
-            totalDelta += delta
-            lines[i] = updated
+            break
         }
-
-        val newText = rebuildFromLines(lines)
-        val newSel = adjustSelection(field.selection, newText.length, firstDelta, totalDelta)
-        return TextFieldValue(newText, newSel)
+        return insertListItem(field, "$indent$number. ")
     }
 
     fun indentLines(field: TextFieldValue, indentUnit: String = "  "): TextFieldValue {
@@ -156,34 +118,6 @@ object MarkdownTextOps {
             val delta = -removed
             if (i == range.first) firstDelta = delta
             totalDelta += delta
-        }
-
-        val newText = rebuildFromLines(lines)
-        val newSel = adjustSelection(field.selection, newText.length, firstDelta, totalDelta)
-        return TextFieldValue(newText, newSel)
-    }
-
-    fun toggleBlockquote(field: TextFieldValue): TextFieldValue {
-        val spans = splitLineSpans(field.text)
-        val range = selectedLineRange(spans, field.selection)
-        val lines = spans.map { it.text }.toMutableList()
-
-        val allQuoted = range.all { BLOCKQUOTE_REGEX.matches(lines[it]) }
-        var firstDelta = 0
-        var totalDelta = 0
-
-        for (i in range) {
-            val line = lines[i]
-            val updated = if (allQuoted) {
-                val m = BLOCKQUOTE_REGEX.matchEntire(line)!!
-                m.groupValues[1] + m.groupValues[2]
-            } else {
-                "> $line"
-            }
-            val delta = updated.length - line.length
-            if (i == range.first) firstDelta = delta
-            totalDelta += delta
-            lines[i] = updated
         }
 
         val newText = rebuildFromLines(lines)
